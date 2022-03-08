@@ -19,11 +19,11 @@ You may obtain a copy of the License at
 package controllers
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/pkg/errors"
 	"github.com/submariner-io/admiral/pkg/federate"
-	"github.com/submariner-io/admiral/pkg/stringset"
 	"github.com/submariner-io/admiral/pkg/syncer"
 	"github.com/submariner-io/admiral/pkg/util"
 	submarinerv1 "github.com/submariner-io/submariner/pkg/apis/submariner.io/v1"
@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog"
@@ -48,7 +49,8 @@ func startIngressEndpointsController(svc *corev1.Service, config *syncer.Resourc
 		baseSyncerController: newBaseSyncerController(),
 		svcName:              svc.Name,
 		namespace:            svc.Namespace,
-		ingressIPMap:         stringset.NewSynchronized(),
+		config:               *config,
+		ingressIPs:           config.SourceClient.Resource(*gvr),
 	}
 
 	fieldSelector := fields.Set(map[string]string{"metadata.name": svc.Name}).AsSelector().String()
@@ -110,44 +112,88 @@ func (c *ingressEndpointsController) process(from runtime.Object, numRequeues in
 func (c *ingressEndpointsController) onCreateOrUpdate(endpoints *corev1.Endpoints, op syncer.Operation) (runtime.Object, bool) {
 	key, _ := cache.MetaNamespaceKeyFunc(endpoints)
 
-	ingressIP := newIngressIP(endpoints.Name, endpoints.Namespace)
-
 	klog.Infof("%q ingress Endpoints %s for service %s", op, key, c.svcName)
 
-	// TODO: consider handling multiple endpoints IPs
-	if len(endpoints.Subsets) == 0 || len(endpoints.Subsets[0].Addresses) == 0 {
-		return nil, false
+	// Get list of current endpoint IPs
+	epIPs := map[string]bool{}
+
+	for _, subset := range endpoints.Subsets {
+		for _, addr := range subset.Addresses {
+			epIPs[addr.IP] = true
+		}
 	}
 
-	ingressIP.ObjectMeta.Annotations = map[string]string{
-		headlessSvcEndpointsIP: endpoints.Subsets[0].Addresses[0].IP,
+	// Get List of existing ingressIPs
+	selector := labels.SelectorFromSet(map[string]string{ServiceRefLabel: endpoints.Name}).String()
+
+	existingIngressIPs, err := c.ingressIPs.Namespace(endpoints.Namespace).List(context.TODO(), metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return nil, true
 	}
 
-	ingressIP.Spec = submarinerv1.GlobalIngressIPSpec{
-		Target:     submarinerv1.HeadlessServiceEndpoints,
-		ServiceRef: &corev1.LocalObjectReference{Name: c.svcName},
+	// Delete unused ingressIPs
+	for _, ingressIP := range existingIngressIPs.Items {
+		annotations := ingressIP.GetAnnotations()
+		if epIP, ok := annotations[headlessSvcEndpointsIP]; ok {
+			if _, used := epIPs[epIP]; used {
+				// ingressIP is still used
+				continue
+			}
+		}
+
+		err := c.ingressIPs.Namespace(ingressIP.GetNamespace()).Delete(context.TODO(), ingressIP.GetName(), metav1.DeleteOptions{})
+		if err != nil {
+			return nil, true
+		}
 	}
 
-	c.ingressIPMap.Add(ingressIP.Name)
+	// Create new ingressIPs
+	for epIP := range epIPs {
+		ingressIP := newIngressIP(endpoints.Name, endpoints.Namespace, epIP)
 
-	return ingressIP, false
+		ingressIP.ObjectMeta.Annotations = map[string]string{
+			headlessSvcEndpointsIP: epIP,
+		}
+
+		ingressIP.Spec = submarinerv1.GlobalIngressIPSpec{
+			Target:     submarinerv1.HeadlessServiceEndpoints,
+			ServiceRef: &corev1.LocalObjectReference{Name: c.svcName},
+		}
+
+		uIngressIP, _, err := util.ToUnstructuredResource(ingressIP, c.config.RestMapper)
+		if err != nil {
+			return nil, true
+		}
+
+		_, err = c.ingressIPs.Namespace(ingressIP.GetNamespace()).Create(context.TODO(), uIngressIP, metav1.CreateOptions{})
+		if err != nil {
+			return nil, true
+		}
+	}
+
+	return nil, false
 }
 
 func (c *ingressEndpointsController) onDelete(endpoints *corev1.Endpoints) (runtime.Object, bool) {
 	key, _ := cache.MetaNamespaceKeyFunc(endpoints)
 
-	ingressIP := newIngressIP(endpoints.Name, endpoints.Namespace)
-	c.ingressIPMap.Remove(ingressIP.Name)
+	selector := labels.SelectorFromSet(map[string]string{ServiceRefLabel: endpoints.Name}).String()
+
+	err := c.ingressIPs.Namespace(endpoints.Namespace).DeleteCollection(context.TODO(), metav1.DeleteOptions{},
+		metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return nil, true
+	}
 
 	klog.Infof("Ingress Endpoints %s for service %s deleted", key, c.svcName)
 
-	return ingressIP, false
+	return nil, false
 }
 
-func newIngressIP(name, namespace string) *submarinerv1.GlobalIngressIP {
+func newIngressIP(name, namespace, epIP string) *submarinerv1.GlobalIngressIP {
 	return &submarinerv1.GlobalIngressIP{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("ep-%.60s", name),
+			Name:      fmt.Sprintf("ep-%.44s-%.15s", name, epIP),
 			Namespace: namespace,
 			Labels: map[string]string{
 				ServiceRefLabel: name,

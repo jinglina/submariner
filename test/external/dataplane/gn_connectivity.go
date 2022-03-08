@@ -311,7 +311,7 @@ func testGlobalNetExternalConnectivity(p testParams, g globalnetTestParams) {
 	p.Framework.CreateServiceExport(extClusterIdx, extSvc.Name)
 
 	// Get globalIPs for the extApp to use later
-	extIngressGlobalIP := getGlobalIngressIPForExternal(p, g, extSvc)
+	extIngressGlobalIP := getGlobalIngressIPForExternal(p, g, extSvc, dockerIP)
 	Expect(extIngressGlobalIP).ToNot(Equal(""))
 
 	extEgressGlobalIPs := p.Framework.AwaitClusterGlobalEgressIPs(extClusterIdx, constants.ClusterGlobalEgressIPName)
@@ -465,7 +465,7 @@ func getGlobalIngressIP(p testParams, service *v1.Service) string {
 	return ""
 }
 
-func getGlobalIngressIPForExternal(p testParams, g globalnetTestParams, service *v1.Service) string {
+func getGlobalIngressIPForExternal(p testParams, g globalnetTestParams, service *v1.Service, dockerIP string) string {
 	extClusterIdx, err := getGatewayClusterIndex(framework.TestContext.ClusterIDs)
 	Expect(err).NotTo(HaveOccurred())
 
@@ -473,7 +473,7 @@ func getGlobalIngressIPForExternal(p testParams, g globalnetTestParams, service 
 	case ClusterIP:
 		return p.Framework.AwaitGlobalIngressIP(extClusterIdx, service.Name, service.Namespace)
 	case Headless:
-		ingressIPName := fmt.Sprintf("ep-%.60s", service.Name)
+		ingressIPName := fmt.Sprintf("ep-%.44s-%.15s", service.Name, dockerIP)
 		return p.Framework.AwaitGlobalIngressIP(extClusterIdx, ingressIPName, service.Namespace)
 	}
 

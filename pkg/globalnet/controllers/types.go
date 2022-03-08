@@ -188,9 +188,10 @@ type ServiceExportEndpointsControllers struct {
 
 type ingressEndpointsController struct {
 	*baseSyncerController
-	svcName      string
-	namespace    string
-	ingressIPMap stringset.Interface
+	svcName    string
+	namespace  string
+	config     syncer.ResourceSyncerConfig
+	ingressIPs dynamic.NamespaceableResourceInterface
 }
 
 type IngressEndpointsControllers struct {
