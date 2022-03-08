@@ -96,29 +96,21 @@ func startIngressEndpointsController(svc *corev1.Service, config *syncer.Resourc
 
 func (c *ingressEndpointsController) process(from runtime.Object, numRequeues int, op syncer.Operation) (runtime.Object, bool) {
 	endpoints := from.(*corev1.Endpoints)
+
+	switch op {
+	case syncer.Create, syncer.Update:
+		return c.onCreateOrUpdate(endpoints, op)
+	case syncer.Delete:
+		return c.onDelete(endpoints)
+	}
+
+	return nil, false
+}
+
+func (c *ingressEndpointsController) onCreateOrUpdate(endpoints *corev1.Endpoints, op syncer.Operation) (runtime.Object, bool) {
 	key, _ := cache.MetaNamespaceKeyFunc(endpoints)
 
-	ingressIP := &submarinerv1.GlobalIngressIP{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("ep-%.60s", endpoints.Name),
-			Namespace: endpoints.Namespace,
-			Labels: map[string]string{
-				ServiceRefLabel: c.svcName,
-			},
-		},
-	}
-
-	if op == syncer.Delete {
-		c.ingressIPMap.Remove(ingressIP.Name)
-		klog.Infof("Ingress Endpoints %s for service %s deleted", key, c.svcName)
-
-		return ingressIP, false
-	}
-
-	if c.ingressIPMap.Contains(ingressIP.Name) {
-		// Avoid assigning ingressIPs to endpoints that are not ready with an endpoint IP
-		return nil, false
-	}
+	ingressIP := newIngressIP(endpoints.Name, endpoints.Namespace)
 
 	klog.Infof("%q ingress Endpoints %s for service %s", op, key, c.svcName)
 
@@ -139,4 +131,27 @@ func (c *ingressEndpointsController) process(from runtime.Object, numRequeues in
 	c.ingressIPMap.Add(ingressIP.Name)
 
 	return ingressIP, false
+}
+
+func (c *ingressEndpointsController) onDelete(endpoints *corev1.Endpoints) (runtime.Object, bool) {
+	key, _ := cache.MetaNamespaceKeyFunc(endpoints)
+
+	ingressIP := newIngressIP(endpoints.Name, endpoints.Namespace)
+	c.ingressIPMap.Remove(ingressIP.Name)
+
+	klog.Infof("Ingress Endpoints %s for service %s deleted", key, c.svcName)
+
+	return ingressIP, false
+}
+
+func newIngressIP(name, namespace string) *submarinerv1.GlobalIngressIP {
+	return &submarinerv1.GlobalIngressIP{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("ep-%.60s", name),
+			Namespace: namespace,
+			Labels: map[string]string{
+				ServiceRefLabel: name,
+			},
+		},
+	}
 }
