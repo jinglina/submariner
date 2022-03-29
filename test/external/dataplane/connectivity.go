@@ -21,6 +21,7 @@ package dataplane
 import (
 	"fmt"
 	"sort"
+	"time"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -224,6 +225,8 @@ func testExternalConnectivity(p testParams) {
 		targetIP = podIP
 	case tcp.ServiceIP:
 		targetIP = svcIP
+		// Wait for the service to be ready.
+		time.Sleep(2 * time.Second)
 	}
 
 	By(fmt.Sprintf("Sending an http request from external app %q to %q in the cluster %q",
